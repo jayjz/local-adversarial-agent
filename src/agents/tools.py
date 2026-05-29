@@ -1,74 +1,61 @@
 """
-LangChain tools with creativity support.
+src/agents/tools.py
+LangChain-compatible tool wrappers.
+These are bound to both Red and Blue agents.
 """
 
 from typing import Dict, Any, Optional
 from langchain.tools import tool
 
-_simulator = None
+from ..env.simulator import NetworkSimulator
 
-def set_simulator(simulator):
+# Global simulator reference (set by workflow)
+_simulator: Optional[NetworkSimulator] = None
+
+
+def set_simulator(simulator: NetworkSimulator):
     global _simulator
     _simulator = simulator
 
-def get_simulator():
+
+def get_simulator() -> NetworkSimulator:
     if _simulator is None:
-        raise RuntimeError("Simulator not initialized")
+        raise RuntimeError("Simulator not initialized. Call set_simulator() first.")
     return _simulator
 
-@tool
-def scan_network(stealth_level: int = 5, creativity_type: Optional[str] = None) -> Dict[str, Any]:
-    """Scan network with optional creativity modifier."""
-    simulator = get_simulator()
-    stealth_level = max(1, min(10, stealth_level))
-    return simulator.scan_network(stealth_level=stealth_level, creativity_type=creativity_type)
 
 @tool
-def exploit_service(host_id: str, port: int, exploit_type: str = "generic", 
-                   creativity_type: Optional[str] = None) -> Dict[str, Any]:
-    """Exploit service with creativity modifier."""
-    simulator = get_simulator()
-    return simulator.exploit_service(
-        host_id=host_id,
-        port=port,
-        exploit_type=exploit_type,
-        creativity_type=creativity_type
-    )
+def scan_network(stealth_level: int = 5, creativity_variant: str = "standard") -> Dict[str, Any]:
+    """Scan the network."""
+    return get_simulator().scan_network(stealth_level, creativity_variant)
+
 
 @tool
-def establish_persistence(host_id: str, method: str = "backdoor",
-                         creativity_type: Optional[str] = None) -> Dict[str, Any]:
-    """Establish persistence with creativity modifier."""
-    simulator = get_simulator()
-    return simulator.establish_persistence(
-        host_id=host_id,
-        method=method,
-        creativity_type=creativity_type
-    )
+def exploit_service(host_id: str, port: int, exploit_type: str = "generic", creativity_variant: str = "standard") -> Dict[str, Any]:
+    """Exploit a service on a host."""
+    return get_simulator().exploit_service(host_id, port, exploit_type, creativity_variant)
+
+
+@tool
+def establish_persistence(host_id: str, method: str = "backdoor", creativity_variant: str = "standard") -> Dict[str, Any]:
+    """Establish persistence on a compromised host."""
+    # Add implementation in simulator if missing
+    return {"success": False, "error": "Not implemented yet"}
+
+
+@tool
+def lateral_move(source_host_id: str, target_host_id: str, method: str = "ssh", creativity_variant: str = "standard") -> Dict[str, Any]:
+    """Lateral movement from compromised host."""
+    return get_simulator().lateral_move(source_host_id, target_host_id, method, creativity_variant)
+
 
 @tool
 def detect_anomaly(host_id: Optional[str] = None) -> Dict[str, Any]:
-    simulator = get_simulator()
-    return simulator.detect_anomaly(host_id=host_id)
+    """Blue Team detection."""
+    return get_simulator().detect_anomaly(host_id)
+
 
 @tool
 def patch_vulnerability(host_id: str, port: int) -> Dict[str, Any]:
-    simulator = get_simulator()
-    return simulator.patch_vulnerability(host_id=host_id, port=port)
-
-@tool
-def analyze_logs(host_id: Optional[str] = None, lookback_minutes: int = 60) -> Dict[str, Any]:
-    simulator = get_simulator()
-    return simulator.analyze_logs(host_id=host_id, lookback_minutes=lookback_minutes)
-
-RED_TEAM_TOOLS = [scan_network, exploit_service, establish_persistence]
-BLUE_TEAM_TOOLS = [detect_anomaly, patch_vulnerability, analyze_logs]
-ALL_TOOLS = RED_TEAM_TOOLS + BLUE_TEAM_TOOLS
-
-def get_tools_for_agent(agent_type: str):
-    if agent_type == "red":
-        return RED_TEAM_TOOLS
-    elif agent_type == "blue":
-        return BLUE_TEAM_TOOLS
-    else:
-        return ALL_TOOLS
+    """Blue Team patching."""
+    return get_simulator().patch_vulnerability(host_id, port)
