@@ -1,77 +1,75 @@
-"""Blue Team agent with full implementation."""
+"""
+src/agents/blue_team.py
+Production-Grade Blue Team Agent.
+
+Utilizes native LangChain tool-calling to respond dynamically to Red Team threats.
+"""
+
 import time
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from langchain_ollama import ChatOllama
-from langchain_core.messages import SystemMessage, HumanMessage
-from ..config import get_model_config
+from langchain_core.messages import SystemMessage
+from ..config import get_model_config, PERFORMANCE_CONFIG
 from ..utils.prompts import BLUE_TEAM_SYSTEM_PROMPT
 from ..utils.logger import setup_logger
-from ..utils.json_parser import safe_parse_llm_response
+
+# Import the actual tool functions to bind to the LLM
+from .tools import detect_anomaly, patch_vulnerability, analyze_logs
 
 logger = setup_logger("agents.blue")
 
 class BlueTeamAgent:
-    def __init__(self, model_name: str = None):
+    """
+    Native Tool-Calling Defensive Agent.
+    """
+    def __init__(self, model_name: Optional[str] = None):
         config = get_model_config("blue")
         self.model_name = model_name or config["model"]
-        self.llm = ChatOllama(
+        
+        # Initialize the defensive LLM (lower temperature for logical consistency)
+        base_llm = ChatOllama(
             model=self.model_name,
-            base_url=config["base_url"],
-            temperature=config["temperature"],
-            top_p=config["top_p"],
-            num_ctx=config["num_ctx"],
-            timeout=config["timeout"]
+            temperature=0.25,           
+            top_p=0.85,
+            num_ctx=PERFORMANCE_CONFIG["blue_team"]["num_ctx"],
+            timeout=PERFORMANCE_CONFIG["blue_team"]["timeout"]
         )
-        self.history = []
-        logger.info(f"Blue Team initialized: {self.model_name}")
+        
+        # Bind defensive tools natively
+        self.tools = [detect_anomaly, patch_vulnerability, analyze_logs]
+        self.bound_llm = base_llm.bind_tools(self.tools)
+        
+        logger.info(f"BlueTeamAgent initialized natively with tool-calling: {self.model_name}")
 
-    def decide_action(self, simulator, round_num: int, human_input: str = None) -> Dict[str, Any]:
-        start_time = time.time()
+    def decide_action(self, state: Dict[str, Any], simulator) -> Any:
+        """
+        Reads the network state and ongoing message history to mount a defense.
+        Returns an AIMessage for the ToolNode to execute.
+        """
         posture = simulator.get_security_posture()
         recent_alerts = [a.description for a in simulator.alerts[-8:]]
-        recent_attacks = [log.action_type for log in simulator.action_log[-6:] if log.agent == "red"]
         
+        # Build the System Prompt
         system_content = BLUE_TEAM_SYSTEM_PROMPT.format(
             security_posture=str(posture),
             recent_alerts="\n".join(recent_alerts) if recent_alerts else "No recent alerts",
-            attacker_activity="\n".join(recent_attacks) if recent_attacks else "No recent attacker activity"
+            attacker_activity="See message history for latest system events."
         )
         
-        human_content = f"""Round {round_num}. Respond with JSON:
-{{
-  "reasoning": "Your analysis",
-  "action": "detect_anomaly|patch_vulnerability|analyze_logs",
-  "parameters": {{}},
-  "confidence": 5,
-  "next_steps": "..."
-}}"""
+        sys_msg = SystemMessage(content=system_content)
         
-        if human_input:
-            human_content += f"\n\nHUMAN: {human_input}"
+        # Combine system context with the graph's ongoing message history
+        # This allows Blue to naturally "see" the Red Team's tool executions
+        messages = [sys_msg] + state.get("messages", [])
         
-        messages = [SystemMessage(content=system_content), HumanMessage(content=human_content)]
+        logger.info("Blue Team analyzing threat landscape...")
         
         try:
-            response = self.llm.invoke(messages)
-            decision = safe_parse_llm_response(response.content, default={
-                "reasoning": "Default detection",
-                "action": "detect_anomaly",
-                "parameters": {},
-                "confidence": 5,
-                "next_steps": "Monitor"
-            })
+            # Invoke the bound LLM
+            response = self.bound_llm.invoke(messages)
+            return response
             
-            decision["execution_time_ms"] = int((time.time() - start_time) * 1000)
-            self.history.append(decision)
-            logger.info(f"Blue: {decision['action']}")
-            return decision
         except Exception as e:
-            logger.error(f"Blue error: {e}")
-            return {
-                "reasoning": "Error fallback",
-                "action": "detect_anomaly",
-                "parameters": {},
-                "confidence": 3,
-                "next_steps": "Manual review required",
-                "execution_time_ms": int((time.time() - start_time) * 1000)
-            }
+            logger.error(f"BlueTeamAgent LLM failure: {e}", exc_info=True)
+            from langchain_core.messages import AIMessage
+            return AIMessage(content="Systems overloaded. Falling back to passive monitoring.")
