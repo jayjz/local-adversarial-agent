@@ -3,10 +3,9 @@ src/graph/workflow.py
 Production LangGraph Orchestration Layer.
 
 Implements native ToolNodes, proper message state reduction, 
-and robust cyclic routing.
+and robust cyclic routing for both Red and Blue teams.
 """
 
-import operator
 from typing import Annotated, TypedDict, Dict, Any, Literal
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
@@ -23,7 +22,7 @@ from ..utils.logger import setup_logger
 logger = setup_logger("workflow")
 
 # 1. Modern Graph State
-# `add_messages` ensures new AIMessages and ToolMessages append correctly instead of overwriting
+# `add_messages` ensures new AIMessages and ToolMessages append correctly
 class GraphState(TypedDict):
     messages: Annotated[list, add_messages]
     round_number: int
@@ -43,65 +42,76 @@ def create_workflow(max_rounds: int = 8):
     blue_agent = BlueTeamAgent()
     orchestrator = OrchestratorAgent()
 
-    # 2. Native ToolNode
-    # This automatically executes any tools the Red LLM requested in its AIMessage
+    # Native ToolNodes for automatic function execution
     red_tools_node = ToolNode(red_agent.tools)
+    blue_tools_node = ToolNode(blue_agent.tools)
 
     workflow = StateGraph(GraphState)
 
-    # 3. Node Definitions
+    # --- Node Definitions ---
     def red_node(state: GraphState) -> Dict[str, Any]:
-        """Invokes the Red LLM and appends its response to the message list."""
         logger.info(f"--- Round {state.get('round_number', 1)}: Red Team Turn ---")
         response = red_agent.decide_action(state, simulator)
         return {"messages": [response], "simulation": simulator.get_state()}
 
     def blue_node(state: GraphState) -> Dict[str, Any]:
-        """Placeholder for Blue Team execution."""
-        # TODO: Refactor Blue Team to use native tool calling similar to Red
-        return {"simulation": simulator.get_state()}
+        logger.info(f"--- Round {state.get('round_number', 1)}: Blue Team Turn ---")
+        response = blue_agent.decide_action(state, simulator)
+        return {"messages": [response], "simulation": simulator.get_state()}
 
     def orchestrator_node(state: GraphState) -> Dict[str, Any]:
-        """Non-LLM rules engine to govern game state and scores."""
-        # TODO: Refactor Orchestrator to pure Python logic
-        return {"simulation": simulator.get_state()}
+        logger.info(f"--- Round {state.get('round_number', 1)}: Orchestrator Evaluation ---")
+        decision = orchestrator.evaluate_round(state, simulator)
+        return {
+            "should_continue": decision.get("continue_simulation", True),
+            "winner": decision.get("winner"),
+            "simulation": simulator.get_state()
+        }
 
     # Add Nodes
     workflow.add_node("red", red_node)
     workflow.add_node("red_tools", red_tools_node)
     workflow.add_node("blue", blue_node)
+    workflow.add_node("blue_tools", blue_tools_node)
     workflow.add_node("orchestrator", orchestrator_node)
 
-    # 4. Smart Edge Routing
+    # --- Edge Routing ---
+
     def red_router(state: GraphState) -> Literal["red_tools", "blue"]:
-        """
-        Checks the last message. If the LLM requested a tool, route to ToolNode.
-        If the LLM just returned text (finished its thought), route to Blue Team.
-        """
+        """Routes Red to its tools if it asked for one, otherwise ends turn."""
         last_message = state["messages"][-1]
         if hasattr(last_message, "tool_calls") and last_message.tool_calls:
             return "red_tools"
         return "blue"
 
-    # Red attempts action -> Tools execute it -> Loops back to Red to observe result -> Red finishes -> Blue
-    workflow.add_conditional_edges("red", red_router)
-    workflow.add_edge("red_tools", "red") 
-    
-    workflow.add_edge("blue", "orchestrator")
+    def blue_router(state: GraphState) -> Literal["blue_tools", "orchestrator"]:
+        """Routes Blue to its tools if it asked for one, otherwise ends turn."""
+        last_message = state["messages"][-1]
+        if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+            return "blue_tools"
+        return "orchestrator"
 
     def orchestrator_router(state: GraphState) -> Literal["red", END]:
         """Enforces round limits and win conditions."""
         if state.get("should_continue", True) and state.get("round_number", 1) < max_rounds:
-            # Increment round safely via reducer logic or direct state update
+            # Note: We return the updated state natively in LangGraph v0.2+ via direct state mutation patterns
+            state["round_number"] += 1 
             return "red"
         return END
 
+    # Connect the Graph
+    workflow.add_conditional_edges("red", red_router)
+    workflow.add_edge("red_tools", "red") 
+    
+    workflow.add_conditional_edges("blue", blue_router)
+    workflow.add_edge("blue_tools", "blue")
+    
+    workflow.add_edge("blue", "orchestrator")
     workflow.add_conditional_edges("orchestrator", orchestrator_router)
     
-    # Execution begins with Red
     workflow.set_entry_point("red")
 
-    # 5. Compile with Thread Memory
+    # Compile with Thread Memory
     memory = MemorySaver()
     app = workflow.compile(checkpointer=memory)
     
