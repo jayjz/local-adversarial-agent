@@ -1,190 +1,101 @@
 """
-Red Team Agent with creativity tracking.
-Passes prompt variant to simulator for mechanical effects.
+src/agents/red_team.py
+Production-Grade Red Team Agent.
+
+Utilizes native LangChain tool-calling (.bind_tools) for deterministic execution,
+replacing brittle JSON regex parsing.
 """
 
-import json
-import random
 import time
 from typing import Dict, Any, Optional
-
 from langchain_ollama import ChatOllama
-from langchain_core.messages import SystemMessage, HumanMessage
-
-from ..config import get_model_config, OLLAMA_BASE_URL, OLLAMA_RETRY_ATTEMPTS, OLLAMA_RETRY_DELAY, FALLBACK_MODELS
-from ..utils.prompts import RED_TEAM_SYSTEM_PROMPT, get_red_prompt_variant, format_network_state, format_recent_actions, RED_TEAM_CREATIVE_VARIANTS
+from langchain_core.messages import SystemMessage
+from ..config import get_model_config, PERFORMANCE_CONFIG
+from ..utils.prompts import RED_TEAM_SYSTEM_PROMPT, get_red_prompt_variant, format_network_state
 from ..utils.logger import setup_logger
-from ..utils.json_parser import safe_parse_llm_response
+
+# Import the actual tool functions to bind to the LLM
+from .tools import scan_network, exploit_service, establish_persistence, lateral_move, exfiltrate_data
 
 logger = setup_logger("agents.red")
 
 class RedTeamAgent:
-    def __init__(self, model_name: str = None):
+    """
+    Native Tool-Calling Red Team Agent.
+    """
+    
+    def __init__(self, model_name: Optional[str] = None):
         config = get_model_config("red")
         self.model_name = model_name or config["model"]
-        self.fallback_models = FALLBACK_MODELS.copy()
-        self.llm = self._create_llm(self.model_name, config)
-        self.attack_history = []
-        self.creative_mode = True
-        self.consecutive_failures = 0
-        self.current_creativity_type = None
-        logger.info(f"Red Team initialized with model: {self.model_name}")
-    
-    def _create_llm(self, model_name: str, config: Dict) -> ChatOllama:
-        return ChatOllama(
-            model=model_name,
-            base_url=OLLAMA_BASE_URL,
-            temperature=config["temperature"],
-            top_p=config["top_p"],
-            num_ctx=config["num_ctx"],
-            timeout=config.get("timeout", 120),
+        
+        # 1. Initialize the base LLM optimized for RTX 4060
+        base_llm = ChatOllama(
+            model=self.model_name,
+            temperature=0.85,           # High temp for creative variants
+            top_p=0.92,
+            num_ctx=PERFORMANCE_CONFIG["red_team"]["num_ctx"],
+            timeout=PERFORMANCE_CONFIG["red_team"]["timeout"]
         )
-    
-    def _invoke_with_retry(self, messages, max_retries: int = None):
-        max_retries = max_retries or OLLAMA_RETRY_ATTEMPTS
-        for attempt in range(max_retries):
-            try:
-                response = self.llm.invoke(messages)
-                self.consecutive_failures = 0
-                return response
-            except Exception as e:
-                self.consecutive_failures += 1
-                logger.warning(f"LLM invoke failed (attempt {attempt + 1}/{max_retries}): {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(OLLAMA_RETRY_DELAY * (attempt + 1))
-                    if self.consecutive_failures >= 2 and self.fallback_models:
-                        fallback = self.fallback_models.pop(0)
-                        logger.info(f"Switching to fallback model: {fallback}")
-                        config = get_model_config("red")
-                        self.llm = self._create_llm(fallback, config)
-                        self.model_name = fallback
-                else:
-                    raise
-    
-    def decide_action(self, simulator, round_num: int, human_input: str = None) -> Dict[str, Any]:
-        """Make decision and track which creativity variant is active."""
+        
+        # 2. Define the action space and bind it natively
+        self.tools = [scan_network, exploit_service, establish_persistence, lateral_move, exfiltrate_data]
+        self.bound_llm = base_llm.bind_tools(self.tools)
+        
+        logger.info(f"RedTeamAgent initialized natively with tool-calling: {self.model_name}")
+
+    def _select_variant(self, round_number: int, posture: Dict) -> str:
+        """Strategic variant selection based on real game state."""
+        compromised = posture.get("compromised_hosts", 0)
+        alerts = posture.get("active_alerts", 0)
+        
+        if round_number <= 2 or compromised == 0:
+            return "heist_movie"          # Early stealth
+        elif alerts >= 5:
+            return "chaos_gremlin"        # High risk / high reward
+        elif compromised >= 2:
+            return "inside_man"           # Leverage existing access
+        elif alerts >= 2:
+            return "thriller_twist"       # Misdirection
+        else:
+            return "lazy_attacker"        # Opportunistic
+
+    def decide_action(self, state: Dict[str, Any], simulator) -> Any:
+        """
+        Invokes the bound LLM. Returns an AIMessage which LangGraph 
+        will automatically append to the message state.
+        """
+        round_num = state.get("round_number", 1)
+        posture = simulator.get_security_posture()
         network_state = format_network_state(simulator)
-        recent_actions = format_recent_actions(simulator)
         
-        # Select and store creativity variant
-        variant = random.choice(RED_TEAM_CREATIVE_VARIANTS)
-        self.current_creativity_type = variant["name"]
-        variant_prompt = variant["prompt"]
+        # 1. Select and format the creative variant
+        variant = self._select_variant(round_num, posture)
+        variant_prompt = get_red_prompt_variant(variant)
         
+        # 2. Build the System Prompt
         system_content = RED_TEAM_SYSTEM_PROMPT.format(
             network_state=network_state,
-            recent_actions=recent_actions
-        ) + f"\n\nCREATIVE APPROACH ({self.current_creativity_type}):\n{variant_prompt}"
+            recent_actions="See message history for recent tool outputs."
+        )
         
-        posture = simulator.get_security_posture()
-        human_content = f"""Round {round_num} - Attack using {self.current_creativity_type} approach.
-
-Compromised: {posture['compromised_hosts']}/{posture['total_hosts']}, Alerts: {posture['active_alerts']}
-
-Respond with JSON:
-{{"reasoning": "...", "action": "scan_network|exploit_service|establish_persistence", "parameters": {{}}, "creativity_note": "..."}}"""
+        # Append the specific creative instruction for this turn
+        system_content += f"\n\nCURRENT DIRECTIVE:\nRound {round_num}. Alert Level: {posture.get('active_alerts', 0)}.\nExecute your turn using the '{variant}' style. {variant_prompt}"
         
-        if human_input:
-            human_content += f"\n\nHUMAN: {human_input}"
+        sys_msg = SystemMessage(content=system_content)
         
-        messages = [SystemMessage(content=system_content), HumanMessage(content=human_content)]
+        # 3. Combine system context with the ongoing graph message history
+        # This allows the LLM to remember its past tool executions
+        messages = [sys_msg] + state.get("messages", [])
+        
+        logger.info(f"Red [{variant}] thinking...")
         
         try:
-            if round_num == 1:
-                logger.info(f"🤖 Red Team thinking with {self.current_creativity_type}...")
-            
-            response = self._invoke_with_retry(messages)
-            decision = safe_parse_llm_response(
-                response.content,
-                default={
-                    "reasoning": "Parse failed",
-                    "action": "scan_network",
-                    "parameters": {"stealth_level": 5},
-                    "creativity_note": "Fallback"
-                }
-            )
-            
-            # Add creativity type to decision for simulator
-            decision["creativity_type"] = self.current_creativity_type
-            decision = self._validate_decision(decision, simulator)
-            
-            self.attack_history.append({
-                "round": round_num,
-                "decision": decision,
-                "creativity_type": self.current_creativity_type,
-                "human_guided": bool(human_input)
-            })
-            
-            logger.info(f"✓ Red [{self.current_creativity_type}]: {decision['action']}")
-            return decision
+            # 4. Invoke the bound LLM. It will return an AIMessage (potentially with tool_calls)
+            response = self.bound_llm.invoke(messages)
+            return response
             
         except Exception as e:
-            logger.error(f"Red Team failed: {e}")
-            fallback = self._fallback_decision(simulator, round_num)
-            fallback["creativity_type"] = "fallback"
-            return fallback
-    
-    def _validate_decision(self, decision: Dict[str, Any], simulator) -> Dict[str, Any]:
-        decision.setdefault("action", "scan_network")
-        decision.setdefault("parameters", {})
-        decision.setdefault("reasoning", "No reasoning")
-        
-        action = decision["action"]
-        params = decision["parameters"]
-        
-        if action == "scan_network":
-            params["stealth_level"] = max(1, min(10, params.get("stealth_level", 5)))
-        elif action == "exploit_service":
-            if "host_id" not in params or "port" not in params:
-                vulnerable = [(h.id, s.port) for h in simulator.hosts.values() 
-                             for s in h.services if s.vulnerable and not s.patched]
-                if vulnerable:
-                    params["host_id"], params["port"] = random.choice(vulnerable)
-                else:
-                    decision["action"] = "scan_network"
-                    params = {"stealth_level": 5}
-            params.setdefault("exploit_type", "generic")
-        elif action == "establish_persistence":
-            candidates = [h.id for h in simulator.hosts.values() 
-                        if h.compromised and not h.persistence]
-            if candidates and "host_id" not in params:
-                params["host_id"] = random.choice(candidates)
-            params.setdefault("method", "backdoor")
-        
-        decision["parameters"] = params
-        return decision
-    
-    def _fallback_decision(self, simulator, round_num: int) -> Dict[str, Any]:
-        vulnerable = [(h.id, s.port) for h in simulator.hosts.values() 
-                     for s in h.services if s.vulnerable and not s.patched and not h.compromised]
-        
-        if vulnerable:
-            host_id, port = random.choice(vulnerable)
-            return {
-                "reasoning": "Fallback exploit",
-                "action": "exploit_service",
-                "parameters": {"host_id": host_id, "port": port, "exploit_type": "default_creds"},
-                "creativity_note": "Auto",
-                "creativity_type": "fallback"
-            }
-        
-        return {
-            "reasoning": "Fallback scan",
-            "action": "scan_network",
-            "parameters": {"stealth_level": 5},
-            "creativity_note": "Auto",
-            "creativity_type": "fallback"
-        }
-    
-    def get_stats(self) -> Dict[str, Any]:
-        creativity_counts = {}
-        for h in self.attack_history:
-            ctype = h.get("creativity_type", "unknown")
-            creativity_counts[ctype] = creativity_counts.get(ctype, 0) + 1
-        
-        return {
-            "total_decisions": len(self.attack_history),
-            "model": self.model_name,
-            "creativity_distribution": creativity_counts,
-            "failures": self.consecutive_failures
-        }
+            logger.error(f"RedTeamAgent LLM failure: {e}", exc_info=True)
+            # Hard fallback if the LLM crashes
+            from langchain_core.messages import AIMessage
+            return AIMessage(content="I am encountering cognitive errors. Passing turn.")
