@@ -82,6 +82,7 @@ class NetworkSimulator:
         )
         self.action_log.append(log_entry)
 
+        # Deterministic Alert Generation
         if final_noise > 5 and agent == "red":
             severity = "critical" if success and final_noise > 8 else "medium"
             alert = Alert(
@@ -96,6 +97,10 @@ class NetworkSimulator:
             self.alerts.append(alert)
 
         return {"success": success, "noise": final_noise, "details": details}
+
+    # ==========================================
+    # RED TEAM ACTIONS
+    # ==========================================
 
     def scan_network(self, stealth_level: int = 5, creativity_variant: str = "standard") -> Dict:
         """Deterministic Scan. Higher requested stealth = less data returned."""
@@ -160,6 +165,37 @@ class NetworkSimulator:
         target.accessed_from = source_host_id
         return self._log_and_alert("red", "lateral_move", target_host_id, True, 6, creativity_variant, {"method": method, "port": open_service.port})
 
+    def establish_persistence(self, host_id: str, method: str, creativity_variant: str = "standard") -> Dict:
+        """Deterministic Persistence. Host must already be compromised."""
+        host = self.hosts.get(host_id)
+        if not host:
+            return self._log_and_alert("red", "establish_persistence", host_id, False, 8, creativity_variant, {"error": "Host not found."})
+            
+        if not host.compromised:
+            return self._log_and_alert("red", "establish_persistence", host_id, False, 7, creativity_variant, {"error": "Cannot establish persistence on uncompromised host."})
+            
+        if host.persistence:
+            return self._log_and_alert("red", "establish_persistence", host_id, False, 4, creativity_variant, {"error": "Persistence already established."})
+            
+        host.persistence = True
+        return self._log_and_alert("red", "establish_persistence", host_id, True, 5, creativity_variant, {"method": method, "status": "active"})
+
+    def exfiltrate_data(self, host_id: str, method: str = "https", creativity_variant: str = "standard") -> Dict:
+        """Deterministic Exfiltration. Host must be compromised."""
+        host = self.hosts.get(host_id)
+        if not host:
+            return self._log_and_alert("red", "exfiltrate_data", host_id, False, 8, creativity_variant, {"error": "Host not found."})
+            
+        if not host.compromised:
+            return self._log_and_alert("red", "exfiltrate_data", host_id, False, 7, creativity_variant, {"error": "Cannot exfiltrate from uncompromised host."})
+            
+        host.data_exfiltrated = True
+        return self._log_and_alert("red", "exfiltrate_data", host_id, True, 6, creativity_variant, {"method": method, "bytes_transferred": 1048576})
+
+    # ==========================================
+    # BLUE TEAM ACTIONS
+    # ==========================================
+
     def detect_anomaly(self, host_id: Optional[str] = None) -> Dict:
         """Deterministic Detection. Reviews alerts and marks hosts as detected."""
         detected_hosts = []
@@ -196,6 +232,30 @@ class NetworkSimulator:
         
         self._log_and_alert("blue", "patch_vulnerability", host_id, True, 0, "standard", {"patched_service": service.service, "port": port})
         return {"success": True, "service_patched": True, "port": port}
+
+    def analyze_logs(self, host_id: Optional[str] = None) -> Dict:
+        """Deterministic Log Analysis. Finds noisy red team actions."""
+        findings = []
+        suspicion_score = 0
+        
+        relevant_actions = [
+            log for log in self.action_log 
+            if log.agent == "red" and (not host_id or log.target_host == host_id)
+        ][-10:] # Look at last 10 actions
+        
+        for action in relevant_actions:
+            if action.detection_score > 4:
+                findings.append({
+                    "action": action.action_type,
+                    "target": action.target_host,
+                    "noise": action.detection_score
+                })
+                suspicion_score += action.detection_score
+                
+        success = len(findings) > 0
+        self._log_and_alert("blue", "analyze_logs", host_id or "network", success, 0, "standard", {"findings_count": len(findings), "total_suspicion": suspicion_score})
+        
+        return {"success": success, "suspicion_score": suspicion_score, "findings": findings}
 
     def get_security_posture(self) -> Dict:
         total_hosts = len(self.hosts)
