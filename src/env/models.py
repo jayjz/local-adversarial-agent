@@ -4,10 +4,10 @@ Pydantic data models for the simulation state.
 Clean, validated, and serializable for exports/annotation.
 """
 
-from typing import Dict, List, Optional, Literal, Annotated
+import uuid
+from typing import Dict, List, Optional, Literal, Annotated, Any
 from datetime import datetime
 from pydantic import BaseModel, Field
-
 
 class Service(BaseModel):
     port: int
@@ -18,7 +18,6 @@ class Service(BaseModel):
     creds: Optional[str] = None
     patched: bool = False
     mitre_techniques: List[str] = Field(default_factory=list)
-
 
 class Host(BaseModel):
     id: str
@@ -36,7 +35,6 @@ class Host(BaseModel):
     data_exfiltrated: bool = False
     accessed_from: Optional[str] = None
 
-
 class Alert(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
     timestamp: datetime = Field(default_factory=datetime.now)
@@ -48,7 +46,6 @@ class Alert(BaseModel):
     false_positive: bool = False
     mitre_techniques: List[str] = Field(default_factory=list)
 
-
 class ActionLog(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.now)
     agent: Literal["red", "blue", "orchestrator", "human"]
@@ -59,7 +56,6 @@ class ActionLog(BaseModel):
     detection_score: int = Field(ge=0, le=10, default=0)
     creativity_type: Optional[str] = None
     mitre_techniques: List[str] = Field(default_factory=list)
-
 
 class SimulationState(BaseModel):
     hosts: Dict[str, Host]
